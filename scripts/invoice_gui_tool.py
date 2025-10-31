@@ -153,7 +153,8 @@ class InvoiceOrganizerGUI:
                 seen_keys[key] = pdf_path
 
             if info.date and info.code and info.number:
-                new_name = f"{info.date}_{info.code}-{info.number}.pdf"
+                display_date = self.format_display_date(info.date)
+                new_name = f"{display_date}_{info.code}-{info.number}.pdf"
                 dest_dir = source_dir / info.date[:6]
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 dest_path = self._unique_path(dest_dir / new_name)
@@ -247,6 +248,18 @@ class InvoiceOrganizerGUI:
         if month_int < 1 or month_int > 12 or day_int < 1 or day_int > 31:
             return None
         return f"{year_int:04d}{month_int:02d}{day_int:02d}"
+
+    @staticmethod
+    def format_display_date(normalized_date: str) -> str:
+        """将 YYYYMMDD 日期格式化为 YYYY年MM月DD日。"""
+
+        if len(normalized_date) != 8 or not normalized_date.isdigit():
+            return normalized_date
+        return (
+            f"{normalized_date[:4]}年"
+            f"{normalized_date[4:6]}月"
+            f"{normalized_date[6:8]}日"
+        )
 
     def _update_progress(self, value: int, maximum: int, message: str) -> None:
         """线程安全地更新进度条和状态信息。"""
