@@ -109,7 +109,10 @@ class InvoiceOrganizerGUI:
             summary = self.process_invoices(source_dir)
             self._show_completion(summary)
         except Exception as exc:  # pragma: no cover - 运行时保护
-            self.master.after(0, lambda: messagebox.showerror("处理失败", str(exc)))
+            error_message = str(exc)
+            self.master.after(
+                0, lambda msg=error_message: messagebox.showerror("处理失败", msg)
+            )
         finally:
             self.master.after(0, lambda: self.start_button.config(state=tk.NORMAL))
 
