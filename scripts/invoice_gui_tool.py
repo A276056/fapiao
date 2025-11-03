@@ -11,26 +11,24 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-from PyPDF2 import PdfReader
+import pdfplumber
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 
-# 正则表达式模式
-INVOICE_DATE_PATTERN = re.compile(r"开票日期[:：]?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})")
-INVOICE_CODE_PATTERN = re.compile(r"发票代码[:：]?\s*(\d{12})")
-INVOICE_NUMBER_PATTERN = re.compile(r"发票号码[:：]?\s*(\d{8,20})")
-INVOICE_AMOUNT_PATTERN = re.compile(r"合计[:：]?\s*([\d,.]+)")
+# 正则表达式模式（根据README要求）
+INVOICE_NUMBER_PATTERN = re.compile(r"\d{15,20}")
+INVOICE_DATE_PATTERN = re.compile(r"\d{4}年\d{1,2}月\d{1,2}日")
+INVOICE_AMOUNT_PATTERN = re.compile(r"¥\s*\d+\.\d{2}")
 
 
 @dataclass
 class InvoiceInfo:
     """保存单份发票提取到的信息。"""
 
-    date: Optional[str]
-    code: Optional[str]
-    number: Optional[str]
-    amount: Optional[str]
+    invoice_number: Optional[str]  # 发票号码
+    invoice_date: Optional[str]    # 开票日期
+    total_amount: Optional[str]    # 价税合计
 
 
 class InvoiceOrganizerGUI:
@@ -126,7 +124,7 @@ class InvoiceOrganizerGUI:
             return "未找到任何 PDF 文件。"
 
         records: List[Dict[str, str]] = []
-        seen_keys: Dict[Tuple[str, str], Path] = {}
+        seen_keys: Dict[str, Path] = {}
         duplicates_removed = 0
         renamed_count = 0
         missing_info_count = 0
@@ -137,11 +135,11 @@ class InvoiceOrganizerGUI:
             try:
                 info = self.extract_invoice_info(pdf_path)
             except Exception:
-                info = InvoiceInfo(date=None, code=None, number=None, amount=None)
+                info = InvoiceInfo(invoice_number=None, invoice_date=None, total_amount=None)
 
-            if info.code and info.number:
-                key = (info.code, info.number)
-                if key in seen_keys:
+            # 按发票号码去重
+            if info.invoice_number:
+                if info.invoice_number in seen_keys:
                     duplicates_removed += 1
                     self._delete_file(pdf_path)
                     records.append(
@@ -153,14 +151,13 @@ class InvoiceOrganizerGUI:
                     )
                     self._update_progress(index, total_files, f"删除重复：{pdf_path.name}")
                     continue
-                seen_keys[key] = pdf_path
+                seen_keys[info.invoice_number] = pdf_path
 
-            if info.date and info.code and info.number:
-                display_date = self.format_display_date(info.date)
-                new_name = f"{display_date}_{info.code}-{info.number}.pdf"
-                dest_dir = source_dir / info.date[:6]
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                dest_path = self._unique_path(dest_dir / new_name)
+            # 检查是否有完整信息
+            if info.invoice_number and info.invoice_date and info.total_amount:
+                # 仅在原文件名前添加日期
+                new_name = f"{info.invoice_date}_{pdf_path.name}"
+                dest_path = self._unique_path(source_dir / new_name)
                 self._move_file(pdf_path, dest_path)
                 renamed_count += 1
                 records.append(
@@ -206,64 +203,153 @@ class InvoiceOrganizerGUI:
         return summary
 
     def extract_invoice_info(self, pdf_path: Path) -> InvoiceInfo:
-        """从 PDF 文件中提取发票信息。"""
-
-        reader = PdfReader(str(pdf_path))
+        """从 PDF 文件中提取发票信息（增强鲁棒性版本）。"""
+        
         text_content = []
-        for page in reader.pages:
-            try:
-                text_content.append(page.extract_text() or "")
-            except Exception:
-                text_content.append("")
-        text = "\n".join(text_content)
-
-        date_match = INVOICE_DATE_PATTERN.search(text)
-        code_match = INVOICE_CODE_PATTERN.search(text)
-        number_match = INVOICE_NUMBER_PATTERN.search(text)
-        amount_match = INVOICE_AMOUNT_PATTERN.search(text)
-
-        normalized_date = self.normalize_date(date_match.group(1) if date_match else None)
-        code = code_match.group(1) if code_match else None
-        number = number_match.group(1) if number_match else None
-        amount = amount_match.group(1) if amount_match else None
-
-        return InvoiceInfo(date=normalized_date, code=code, number=number, amount=amount)
-
-    @staticmethod
-    def normalize_date(raw_date: Optional[str]) -> Optional[str]:
-        """将日期标准化为 YYYYMMDD 格式。"""
-
-        if not raw_date:
-            return None
-        cleaned = raw_date.strip()
-        cleaned = cleaned.replace("年", "-").replace("月", "-").replace("日", "")
-        cleaned = cleaned.replace("/", "-").replace(".", "-")
-        parts = re.findall(r"\d+", cleaned)
-        if len(parts) != 3:
-            return None
-        year, month, day = parts
         try:
-            year_int = int(year)
-            month_int = int(month)
-            day_int = int(day)
-        except ValueError:
-            return None
-        if month_int < 1 or month_int > 12 or day_int < 1 or day_int > 31:
-            return None
-        return f"{year_int:04d}{month_int:02d}{day_int:02d}"
-
-    @staticmethod
-    def format_display_date(normalized_date: str) -> str:
-        """将 YYYYMMDD 日期格式化为 YYYY年MM月DD日。"""
-
-        if len(normalized_date) != 8 or not normalized_date.isdigit():
-            return normalized_date
-        return (
-            f"{normalized_date[:4]}年"
-            f"{normalized_date[4:6]}月"
-            f"{normalized_date[6:8]}日"
+            with pdfplumber.open(str(pdf_path)) as pdf:
+                for page in pdf.pages:
+                    try:
+                        page_text = page.extract_text() or ""
+                        text_content.append(page_text)
+                    except Exception:
+                        text_content.append("")
+        except Exception as e:
+            raise Exception(f"无法读取PDF文件 {pdf_path.name}: {e}")
+        
+        # 合并多页文本并按行分割
+        full_text = "\n".join(text_content)
+        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+        
+        if not lines:
+            return InvoiceInfo(invoice_number=None, invoice_date=None, total_amount=None)
+        
+        # 1. 提取开票日期（多种方式尝试）
+        invoice_date = self._extract_date(lines)
+        
+        # 2. 提取发票号码（多种策略）
+        invoice_number = self._extract_invoice_number(lines, invoice_date)
+        
+        # 3. 提取价税合计金额（增强匹配）
+        total_amount = self._extract_amount(lines)
+        
+        return InvoiceInfo(
+            invoice_number=invoice_number,
+            invoice_date=invoice_date,
+            total_amount=total_amount
         )
+    
+    def _extract_date(self, lines):
+        """提取开票日期，支持多种格式"""
+        # 方式1: 标准格式 "YYYY年MM月DD日"
+        for line in lines:
+            if "年" in line and "月" in line and "日" in line:
+                date_match = INVOICE_DATE_PATTERN.search(line)
+                if date_match:
+                    return date_match.group(0)
+        
+        # 方式2: 包含"开票日期"关键字的行
+        for line in lines:
+            if "开票日期" in line:
+                # 尝试从该行提取日期
+                date_match = re.search(r'(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})', line)
+                if date_match:
+                    raw_date = date_match.group(1)
+                    # 标准化为YYYY年MM月DD日格式
+                    if '-' in raw_date or '/' in raw_date:
+                        return raw_date.replace('-', '年').replace('/', '月') + '日'
+                    else:
+                        return raw_date
+        
+        # 方式3: 任何包含年月日的行
+        for line in lines:
+            if re.search(r'\d{4}.*年.*\d{1,2}.*月.*\d{1,2}.*日', line):
+                date_match = re.search(r'(\d{4}.*年.*\d{1,2}.*月.*\d{1,2}.*日)', line)
+                if date_match:
+                    return date_match.group(1)
+        
+        return None
+    
+    def _extract_invoice_number(self, lines, invoice_date):
+        """提取发票号码，使用多种策略"""
+        
+        # 策略1: 如果有日期，查找日期行附近的数字
+        if invoice_date:
+            for i, line in enumerate(lines):
+                if invoice_date in line:
+                    # 查找上一行
+                    if i > 0:
+                        prev_line = lines[i-1]
+                        number_match = INVOICE_NUMBER_PATTERN.search(prev_line)
+                        if number_match:
+                            return number_match.group(0)
+                    
+                    # 查找下一行
+                    if i < len(lines) - 1:
+                        next_line = lines[i+1]
+                        number_match = INVOICE_NUMBER_PATTERN.search(next_line)
+                        if number_match:
+                            return number_match.group(0)
+        
+        # 策略2: 查找包含发票号码关键字的行
+        for line in lines:
+            if any(keyword in line for keyword in ["发票号码", "号码", "发票编号", "Invoice Number"]):
+                number_match = INVOICE_NUMBER_PATTERN.search(line)
+                if number_match:
+                    return number_match.group(0)
+                # 如果没有找到长数字，尝试提取冒号后面的数字
+                colon_match = re.search(r'[：:]\s*(\d{8,})', line)
+                if colon_match:
+                    return colon_match.group(1)
+        
+        # 策略3: 查找所有长数字，选择最可能是发票号码的
+        long_numbers = []
+        for line in lines:
+            matches = INVOICE_NUMBER_PATTERN.findall(line)
+            long_numbers.extend(matches)
+        
+        if long_numbers:
+            # 优先选择长度最长的数字
+            return max(long_numbers, key=len)
+        
+        return None
+    
+    def _extract_amount(self, lines):
+        """提取价税合计金额，增强匹配"""
+        # 优先级顺序：从高到低
+        keywords_priority = [
+            ["价税合计"],
+            ["圆整"],
+            ["合计"],
+            ["金额"],
+            ["总计"],
+            ["应收"]
+        ]
+        
+        for keywords in keywords_priority:
+            for line in lines:
+                if any(keyword in line for keyword in keywords):
+                    # 查找金额模式（保留负号）
+                    amount_match = re.search(r'¥\s*(-?\d+\.\d{2})', line)
+                    if amount_match:
+                        return amount_match.group(1)
+                    
+                    # 如果没找到¥符号，尝试查找纯数字金额（支持负号）
+                    amount_match = re.search(r'(-?\d+\.\d{2})', line)
+                    if amount_match:
+                        return amount_match.group(1)
+        
+        # 最后尝试：查找任何包含货币符号的行（保留负号）
+        for line in lines:
+            if "¥" in line or "￥ " in line:
+                # 保留负号：¥-323460.00 → -323460.00
+                amount_match = re.search(r'¥\s*(-?\d+\.\d{2})', line)
+                if amount_match:
+                    return amount_match.group(1)  # 直接返回包含负号的金额
+        
+        return None
 
+    
     def _update_progress(self, value: int, maximum: int, message: str) -> None:
         """线程安全地更新进度条和状态信息。"""
 
